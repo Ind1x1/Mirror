@@ -102,6 +102,14 @@ class LLMRayActor(MirrorLLMRayActor):
 
     #TODO: Mirror
 
+    def sync_model_grads(self, name, dtype, shape, empty_cache = False):
+        """
+        sync model grads
+        """
+        return self.llm.collective_rpc(
+            "sync_model_grads", args=(name, dtype, shape, empty_cache)
+        )
+
     def step(self, name, dtype, shape, empty_cache=False):
         """
         mirror update weight
@@ -110,12 +118,14 @@ class LLMRayActor(MirrorLLMRayActor):
             "step", args=(name, dtype, shape, empty_cache)
         )  
     
-    def create_ops(self, *args, **kwargs):
+    def create_ops(
+        self, name, lr = 1e-5, betas = (0.9, 0.999), eps = 1e-8, weight_decay = 0, adamw_mode = True
+    ):
         """
         create ops
         """
         return self.llm.collective_rpc(
-            "create_ops", args=args, kwargs=kwargs
+            "create_ops", args=(name, lr, betas, eps, weight_decay, adamw_mode)
         )
     
 def create_vllm_engine(

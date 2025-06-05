@@ -22,12 +22,13 @@ from openrlhf.utils.deepspeed.deepspeed_utils import offload_deepspeed_states, r
 from openrlhf.utils.distributed_util import init_process_group, torch_dist_barrier_and_cuda_sync
 from openrlhf.utils.logging_utils import init_logger
 
-from ..ppo_utils import NaiveReplayBuffer
+from ...ppo_utils import NaiveReplayBuffer
 
 logger = init_logger(__name__)
 
 from .launcher import BasePPORole
 from .utils import get_physical_gpu_id
+
 
 
 class ActorPPOTrainer(ABC):
@@ -72,8 +73,7 @@ class ActorPPOTrainer(ABC):
             clip_eps_low=self.args.eps_clip_low_high[0],
             clip_eps_high=self.args.eps_clip_low_high[1],
         )
-
-        # Mixtral 8x7b
+         # Mixtral 8x7b
         self.aux_loss = self.args.aux_loss_coef > 1e-8
 
         self.replay_buffer = NaiveReplayBuffer(
@@ -145,7 +145,7 @@ class ActorPPOTrainer(ABC):
 
     def ppo_train(self, kl_ctl: float):
         # replay buffer may be empty at first, we should rebuild at each training
-        not_shuffle = self.strategy.ring_attn_group is not None or self.args.ds_tensor_parallel_size > 1
+        not_shuffle = self.strategy.ring_attn_group is not None or self.args.ds_tensor_parallel_size > 1    # shuffle
         dataloader = DataLoader(
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
@@ -159,11 +159,13 @@ class ActorPPOTrainer(ABC):
         status_list = []
         status_mean = {}
         for epoch in range(self.max_epochs):
+            # tqdm 进度条
             pbar = tqdm(
                 dataloader,
                 desc=f"Train epoch [{epoch + 1}/{self.max_epochs}]",
                 disable=not self.strategy.is_rank_0(),
             )
+            # for every batch
             for experience in pbar:
                 experience.to_device(device)
                 status = self.training_step(experience, kl_ctl)
@@ -187,6 +189,7 @@ class ActorPPOTrainer(ABC):
                 status_list.append(status)
                 pbar.set_postfix(short_status)
 
+        """Average key status"""
         if status_list:
             status_mean = status_list[0]
             for m in status_list[1:]:
@@ -198,7 +201,9 @@ class ActorPPOTrainer(ABC):
 
     def training_step(self, experience: Experience, kl_ctl: float) -> Dict[str, float]:
         self.actor.train()
-
+        """
+        Forward
+        """
         sequences = experience.sequences
         action_mask = experience.action_mask
         attention_mask = experience.attention_mask
@@ -251,6 +256,7 @@ class ActorPPOTrainer(ABC):
             if self.args.entropy_loss_coef != 0:
                 loss -= entropy_loss * self.args.entropy_loss_coef
 
+        """ Backward and Update"""
         self.strategy.backward(loss, self.actor, self.actor_optim)
         self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
         if self.ema_model:
@@ -269,6 +275,7 @@ class ActorPPOTrainer(ABC):
                 status[k] = v.float().mean().item()
         return status
 
+    """sync weights to vllm engines"""
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
         cache_reset_refs = []
@@ -328,7 +335,6 @@ class ActorPPOTrainer(ABC):
                 ray.get(refs)
             torch_dist_barrier_and_cuda_sync()
 
-        """以层为粒度更新"""
         for name, param in model.named_parameters():
             count += 1  # empty_cache at last param
 
