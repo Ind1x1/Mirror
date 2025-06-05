@@ -102,12 +102,12 @@ class LLMRayActor(MirrorLLMRayActor):
 
     #TODO: Mirror
 
-    def sync_model_grads(self, name, dtype, shape, empty_cache = False):
+    def sync_grads(self, name, dtype, shape, empty_cache = False):
         """
         sync model grads
         """
         return self.llm.collective_rpc(
-            "sync_model_grads", args=(name, dtype, shape, empty_cache)
+            "sync_grads", args=(name, dtype, shape, empty_cache)
         )
 
     def step(self, name, dtype, shape, empty_cache=False):

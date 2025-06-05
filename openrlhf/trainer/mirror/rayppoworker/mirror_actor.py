@@ -361,6 +361,48 @@ class ActorPPOTrainer(ABC):
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
+    def _syncgrads_to_vllm(self):
+        use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+        cache_reset_refs = []
+        if use_prefix_cache and torch.distributed.get_rank() == 0:
+            # clear prefix cache
+            for engine in self.vllm_engines:
+                cache_reset_refs.append(engine.reset_prefix_cache.remote())
+
+        torch.cuda.empty_cache()
+        model = self.actor.model.module
+        count, num_params = 0, len(list(model.named_parameters()))
+
+        def _sync_grads(param, count, num_params):
+            use_ray = getattr(self.strategy.args, "vllm_sync_with_ray", False)
+            if torch.distributed.get_rank() == 0:
+                shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+                refs = [
+                    engine.sync_grads.remote(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
+                    for engine in self.vllm_engines
+                ]
+
+                if use_ray:
+                    import ray.util.collective as collective
+
+                    collective.broadcast(param.grad, 0, group_name=self._model_update_group)
+                else:
+                    torch.distributed.broadcast(param.grad, 0, group=self._model_update_group)
+
+                ray.get(refs)
+
+        for name, param in model.named_parameters():
+            count += 1
+            if not self.use_cuda_ipc:
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                if self.strategy.args.ds_tensor_parallel_size > 1:
+                    with deepspeed.module_inject.layers.GatherReplacedLayerParams([param], model, enabled=True):
+                        _sync_grads(param, count, num_params)
+                else:
+                    with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+                        _sync_grads(param, count, num_params)
+            else:
+                assert self.use_cuda_ipc == False , "use_cuda_ipc == Ture is not support yet"
 
 @ray.remote(num_gpus=1)
 class ActorModelRayActor(BasePPORole):

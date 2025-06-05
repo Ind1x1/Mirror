@@ -88,16 +88,34 @@ class MirrorWorkerWarp:
         self.model_runner.model.load_weights(weights=[(name, weight)])
         torch.cuda.synchronize()
 
-    def sync_model_grads(self, name, dtype, shape, empty_cache = False):
+    def sync_grads(self, name, dtype, shape, empty_cache = False):
         """
         sync model grads
         """
-        pass
-        
-    def step(self, name, dtype, shape, empty_cache=False):
+        import torch
+        if torch.distributed.get_rank() == 0:
+            print(f"sync grads: {name}, dtype: {dtype}, shape: {shape}")
+
+        assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+        grads = torch.empty(shape, dtype=dtype, device="cuda")
+        if self._model_update_with_ray:
+            import ray.util.collective as collective
+            collective.broadcast(grads, 0, group_name=self._model_update_group)
+        else:
+            torch.distributed.broadcast(grads, 0, group=self._model_update_group)
+
+        param = self.model_runner.model.get_parameter(name)
+        param.grad = grads
+
+        del grads
+
+    def step(self):
         """
         mirror update weight
         """
+        if not hasattr(self, "optimizer"):
+            print("Warning: optimizer not initialized, skipping step")
+            return False
         self.optimizer.step()
         self.optimizer.zero_grad()
         return True
